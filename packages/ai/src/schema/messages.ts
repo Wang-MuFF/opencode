@@ -235,36 +235,45 @@ export class SystemMessage extends Schema.Class<SystemMessage>("LLM.SystemMessag
 export class UserMessage extends Schema.Class<UserMessage>("LLM.UserMessage")({
   id: Schema.optional(Schema.String),
   role: Schema.Literal("user"),
-  content: Schema.Array(ContentPart),
+  content: Schema.Array(Schema.Union([TextPart, MediaPart]).pipe(Schema.toTaggedUnion("type"))),
   providerMetadata: Schema.optional(ProviderMetadata),
 }) {}
 
 export class AssistantMessage extends Schema.Class<AssistantMessage>("LLM.AssistantMessage")({
   id: Schema.optional(Schema.String),
   role: Schema.Literal("assistant"),
-  content: Schema.Array(ContentPart),
+  content: Schema.Array(
+    Schema.Union([TextPart, ReasoningPart, ToolCallPart, ToolResultPart, MediaPart, CompactionPart]).pipe(
+      Schema.toTaggedUnion("type"),
+    ),
+  ),
   providerMetadata: Schema.optional(ProviderMetadata),
 }) {}
 
 export class ToolMessage extends Schema.Class<ToolMessage>("LLM.ToolMessage")({
   id: Schema.optional(Schema.String),
   role: Schema.Literal("tool"),
-  content: Schema.Array(ContentPart),
+  content: Schema.Array(ToolResultPart),
 }) {}
 
 export type Message = SystemMessage | UserMessage | AssistantMessage | ToolMessage
 
 export namespace Message {
-  export type ContentInput = string | ContentPart | ReadonlyArray<ContentPart>
-  export type SystemContentInput = string | TextPart | ReadonlyArray<TextPart>
+  export type ContentInput<Part extends ContentPart = ContentPart> = string | Part | ReadonlyArray<Part>
+  export type SystemContentInput = ContentInput<TextPart>
+  export type UserContentInput = ContentInput<UserMessage["content"][number]>
+  export type AssistantContentInput = ContentInput<AssistantMessage["content"][number]>
   type RoleInput<Props, Content> = Omit<Props, "content"> & { readonly content: Content }
   export type SystemInput = RoleInput<
     ConstructorParameters<typeof SystemMessage>[0],
-    string | SystemMessage["content"][number] | SystemMessage["content"]
+    ContentInput<SystemMessage["content"][number]>
   >
-  export type UserInput = RoleInput<ConstructorParameters<typeof UserMessage>[0], ContentInput>
-  export type AssistantInput = RoleInput<ConstructorParameters<typeof AssistantMessage>[0], ContentInput>
-  export type ToolInput = RoleInput<ConstructorParameters<typeof ToolMessage>[0], ContentInput>
+  export type UserInput = RoleInput<ConstructorParameters<typeof UserMessage>[0], UserContentInput>
+  export type AssistantInput = RoleInput<ConstructorParameters<typeof AssistantMessage>[0], AssistantContentInput>
+  export type ToolInput = RoleInput<
+    ConstructorParameters<typeof ToolMessage>[0],
+    ToolResultPart | ReadonlyArray<ToolResultPart>
+  >
   export type Input = SystemInput | UserInput | AssistantInput | ToolInput
 }
 
@@ -297,7 +306,9 @@ function make(input: Message | Message.Input): Message {
         ? input
         : new AssistantMessage({ ...input, content: content(input.content) })
     case "tool":
-      return input instanceof ToolMessage ? input : new ToolMessage({ ...input, content: content(input.content) })
+      return input instanceof ToolMessage
+        ? input
+        : new ToolMessage({ ...input, content: isParts(input.content) ? [...input.content] : [input.content] })
   }
   // Untyped callers can still pass an unknown role; reject it the way the schema does.
   return Schema.decodeUnknownSync(messageSchema)(input)
@@ -313,8 +324,8 @@ export const Message = withStatics(messageSchema, {
   }),
   content,
   make,
-  user: (input: Message.ContentInput) => make({ role: "user", content: input }),
-  assistant: (input: Message.ContentInput) => make({ role: "assistant", content: input }),
+  user: (input: Message.UserContentInput) => make({ role: "user", content: input }),
+  assistant: (input: Message.AssistantContentInput) => make({ role: "assistant", content: input }),
   /**
    * Add an operator-authored instruction at this chronological point in the
    * conversation. This is distinct from the initial `LLMRequest.system`
